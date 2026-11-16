@@ -259,6 +259,23 @@ async def test_set_temperature_while_off_is_used_when_turned_on(hass, setup_oven
     assert stage["temperatureBulbs"]["dry"]["setpoint"]["celsius"] == 200
 
 
+async def test_climate_converts_native_celsius_for_fahrenheit_users(hass, setup_oven):
+    # The entity reports native Celsius; HA converts both ways for a °F install
+    hass.config.units = US_CUSTOMARY_SYSTEM
+    _, _, ws, _ = setup_oven
+    await hass.services.async_call(
+        "climate", "set_temperature", {"entity_id": CLIMATE, "temperature": 350}, blocking=True
+    )
+    attrs = hass.states.get(CLIMATE).attributes
+    assert attrs["current_temperature"] == 72  # 22.29 °C, shown in whole °F
+    assert attrs["temperature"] == 350
+    assert attrs["min_temp"] == 77 and attrs["max_temp"] == 482
+    await hass.services.async_call("climate", "turn_on", {"entity_id": CLIMATE}, blocking=True)
+    setpoint = ws.sent[-1]["payload"]["payload"]["stages"][0]["temperatureBulbs"]["dry"]["setpoint"]
+    assert setpoint["celsius"] == pytest.approx(176.67, abs=0.01)
+    assert setpoint["fahrenheit"] == 350
+
+
 async def test_set_temperature_while_cooking_keeps_the_cook(hass, setup_oven):
     from custom_components.anova_precision_oven.cook import build_cook_stages
 

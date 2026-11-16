@@ -93,7 +93,7 @@ async def async_setup_entry(
 class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
     """Anova Oven climate control."""
 
-    _attr_temperature_unit = UnitOfTemperature.CELSIUS
+    _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
         | ClimateEntityFeature.TURN_ON
@@ -141,8 +141,8 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
         return HVACAction.OFF
 
     @property
-    def current_temperature(self) -> float | None:
-        """Return the current temperature."""
+    def native_current_temperature(self) -> float | None:
+        """Return the current temperature in Celsius."""
         state = self.coordinator.get_device_state(self._device_id)
         if not state:
             return None
@@ -151,8 +151,8 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
         return bulbs.get(bulbs.get("mode", "dry"), {}).get("current", {}).get("celsius")
 
     @property
-    def target_temperature(self) -> float | None:
-        """Return the target temperature."""
+    def native_target_temperature(self) -> float | None:
+        """Return the target temperature in Celsius."""
         state = self.coordinator.get_device_state(self._device_id)
         if not state:
             return None
@@ -230,7 +230,7 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
 
     async def _async_turn_on(self) -> None:
         """Start cooking with current or default temperature."""
-        target_temp = self.target_temperature
+        target_temp = self.native_target_temperature
         if target_temp is None:
             target_temp = DEFAULT_TEMPERATURE_CELSIUS
 

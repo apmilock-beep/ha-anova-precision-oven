@@ -16,4 +16,5 @@ Home Assistant integration for the Anova Precision Oven (APO) using Anova's [off
 
 ### Requirements
 
-Anova Personal Access Token (starts with `anova-`) from the Anova developer portal.
+- Home Assistant 2026.11 or newer.
+- Anova Personal Access Token (starts with `anova-`) from the Anova developer portal.

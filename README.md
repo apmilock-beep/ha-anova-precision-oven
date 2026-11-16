@@ -152,6 +152,8 @@ The tests use an idle state captured from a real v1 oven.
 
 ## Installation
 
+Requires Home Assistant 2026.11 or newer.
+
 ### HACS
 
 1. In HACS, open the three-dot menu and select **Custom repositories**
