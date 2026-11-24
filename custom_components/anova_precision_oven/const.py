@@ -27,6 +27,8 @@ TEMP_MAX_CELSIUS = 250
 DEFAULT_TEMPERATURE_CELSIUS = 175
 DEFAULT_FAN_SPEED = 100
 DEFAULT_HUMIDITY = 0
+# Climate target humidity (steam %) step, matching the 5-degree temperature step
+HUMIDITY_STEP = 5
 
 # Command responses
 RESPONSE = "RESPONSE"

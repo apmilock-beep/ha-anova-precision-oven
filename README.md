@@ -39,7 +39,7 @@ Anova Precision Cooker (APC sous vide circulator). That's a different product wi
 | Timer | Cook timer remaining (seconds) |
 | Mode | `idle` / `preheat` / `cook` |
 | Dry / Wet / Probe temperature setpoint | Target temperatures from whatever cook is running |
-| Humidity setpoint | Target humidity percentage |
+| Humidity setpoint | Steam setpoint: steam percentage in a dry cook, relative humidity in sous vide (`steam_mode` attribute says which); 0 with no steam |
 | Fan speed | Current fan speed percentage |
 | Rack position | Current rack position |
 | Timer start type | `Immediately` / `When preheated` / etc. |
@@ -78,7 +78,7 @@ A restart mid-cook doesn't re-fire milestones already reached. Trigger on it wit
 
 ### Climate (1)
 
-`OFF` and `HEAT` HVAC modes, target temperature 25-250 C. See [Climate Entity Behavior](#climate-entity-behavior).
+`OFF` and `HEAT` HVAC modes, target temperature 25-250 C, target humidity 0-100 % (steam). See [Climate Entity Behavior](#climate-entity-behavior).
 
 ### Switch (1)
 
@@ -86,10 +86,12 @@ Lamp on/off.
 
 ## Climate Entity Behavior
 
-The climate entity works like a thermostat for the oven (target step 5°):
+The climate entity works like a thermostat for the oven (temperature step 5°, humidity step 5 %):
 
-- **Off:** changing the target only stores it. Turning on starts a simple dry cook at that temperature (top + rear elements, fan 100%, no steam, no timer).
-- **Cooking:** changing the target re-sends the running cook with the new temperature, from the active stage on. Elements, fan, steam, vent and the remaining timer are kept; a preheat stage and the cook stage after it move together, while later stages with their own temperatures keep them. Anova's API has no "adjust" command, so this is a fresh cook as far as the oven is concerned (its cook ID changes).
+- **Target humidity is the oven's steam setting.** In a dry cook it is the steam percentage (what the Anova app calls steam, sent as `steam-percentage`); in a sous vide (wet bulb) cook it is relative humidity. `current_humidity` is the measured relative humidity, which the oven reports in sous vide but not with steam percentage.
+- **Off:** changing the temperature or humidity only stores it. Turning on starts a dry cook like the app's manual cook: rear element, fan 100 %, a preheat stage, no timer, the stored (or last) temperature and steam percentage. After a sous vide cook, turning on uses 175 °C unless a temperature was chosen.
+- **Cooking:** changing the temperature or the humidity re-sends the running cook from the active stage on, with only that value changed. Elements, fan, vent, the other value and the remaining timer are kept; a preheat stage and the cook stage after it move together, while later stages with their own settings keep them. A cook already past preheat is re-sent without its preheat stage. Adding steam locks the fan on high, as the app does. Anova's API has no "adjust" command, so this is a fresh cook as far as the oven is concerned (its cook ID changes).
+- **Preheating:** v1 ovens report mode `cook` during the preheat stage, so `hvac_action` reads the active stage and shows `preheating` until the cook stage starts.
 - `turn_off` sends `CMD_APO_STOP`.
 
 ## Actions
@@ -148,7 +150,7 @@ pip install pytest-homeassistant-custom-component
 pytest
 ```
 
-The tests use an idle state captured from a real v1 oven.
+The tests use an idle state and two cooks (35 % steam, and sous vide with a timer) captured from a real v1 oven, as the Anova app sent them.
 
 ## Installation
 
@@ -157,7 +159,7 @@ Requires Home Assistant 2026.11 or newer.
 ### HACS
 
 1. In HACS, open the three-dot menu and select **Custom repositories**
-2. Add `https://github.com/fisherbln/ha-anova-precision-oven` as an **Integration**
+2. Add `https://github.com/wrongdoug/ha-anova-precision-oven` as an **Integration**
 3. Install "Anova Precision Oven" and restart HA
 
 ### Manual

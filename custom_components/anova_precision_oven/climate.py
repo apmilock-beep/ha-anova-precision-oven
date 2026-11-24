@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-import uuid
 
 from homeassistant.components.climate import (
     ClimateEntity,
@@ -34,9 +33,8 @@ from .const import (
     CMD_APO_START,
     CMD_APO_STOP,
     COOK_MODE_DRY,
-    DEFAULT_FAN_SPEED,
-    DEFAULT_HUMIDITY,
     DEFAULT_TEMPERATURE_CELSIUS,
+    HUMIDITY_STEP,
     OVEN_TYPE_V1,
     OVEN_TYPE_V2,
     TEMP_MAX_CELSIUS,
@@ -44,10 +42,11 @@ from .const import (
 )
 from .cook import (
     CookValidationError,
+    adjust_stages,
     build_cook_stages,
     build_start_payload,
     prepare_custom_stages,
-    retarget_stages,
+    stage_steam,
 )
 from .coordinator import AnovaOvenConfigEntry, AnovaOvenCoordinator
 from .entity import AnovaOvenEntity
@@ -96,6 +95,7 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
     _attr_native_temperature_unit = UnitOfTemperature.CELSIUS
     _attr_supported_features = (
         ClimateEntityFeature.TARGET_TEMPERATURE
+        | ClimateEntityFeature.TARGET_HUMIDITY
         | ClimateEntityFeature.TURN_ON
         | ClimateEntityFeature.TURN_OFF
     )
@@ -103,6 +103,9 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
     _attr_min_temp = TEMP_MIN_CELSIUS
     _attr_max_temp = TEMP_MAX_CELSIUS
     _attr_target_temperature_step = 5
+    _attr_min_humidity = 0
+    _attr_max_humidity = 100
+    _attr_target_humidity_step = HUMIDITY_STEP
 
     def __init__(
         self,
@@ -112,8 +115,9 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
         """Initialize the climate entity."""
         super().__init__(coordinator, device_id)
         self._attr_unique_id = f"{device_id}_climate"
-        # Target chosen while the oven is off; used when it's turned on
+        # Targets chosen while the oven is off; used when it's turned on
         self._pending_target: float | None = None
+        self._pending_humidity: int | None = None
         self._attr_name = None
 
     @property
@@ -137,8 +141,61 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
         if mode == "preheat":
             return HVACAction.PREHEATING
         if mode == "cook":
+            # v1 ovens report mode "cook" through the preheat stage too
+            if (self._active_stage(state) or {}).get("type") == "preheat":
+                return HVACAction.PREHEATING
             return HVACAction.HEATING
         return HVACAction.OFF
+
+    @staticmethod
+    def _cook(state: dict[str, Any]) -> dict[str, Any]:
+        cook = state.get("cook")
+        return cook if isinstance(cook, dict) else {}
+
+    def _active_stage(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        cook = self._cook(state)
+        stages = cook.get("stages")
+        if not isinstance(stages, list):
+            return None
+        active_id = cook.get("activeStageId")
+        return next(
+            (s for s in stages if isinstance(s, dict) and s.get("id") == active_id),
+            None,
+        )
+
+    @staticmethod
+    def _node_steam(state: dict[str, Any]) -> tuple[str | None, int | None]:
+        """Return the oven's steam mode and setpoint as it reports them."""
+        steam = state.get("nodes", {}).get("steamGenerators", {})
+        mode = steam.get("mode")
+        if mode == "steam-percentage":
+            return mode, (steam.get("steamPercentage") or {}).get("setpoint")
+        if mode == "relative-humidity":
+            return mode, (steam.get("relativeHumidity") or {}).get("setpoint")
+        return mode, 0 if mode == "idle" else None
+
+    @property
+    def current_humidity(self) -> float | None:
+        """Return the measured relative humidity, when the oven reports it."""
+        state = self.coordinator.get_device_state(self._device_id)
+        if not state:
+            return None
+        steam = state.get("nodes", {}).get("steamGenerators", {})
+        return (steam.get("relativeHumidity") or {}).get("current")
+
+    @property
+    def target_humidity(self) -> float | None:
+        """Return the steam setting: steam percentage, or humidity in sous vide."""
+        state = self.coordinator.get_device_state(self._device_id)
+        if not state:
+            return None
+        if self.hvac_mode == HVACMode.OFF and self._pending_humidity is not None:
+            return self._pending_humidity
+        if self.hvac_mode == HVACMode.HEAT:
+            stage = self._active_stage(state)
+            if stage is not None:
+                return stage_steam(stage)
+        return self._node_steam(state)[1]
 
     @property
     def native_current_temperature(self) -> float | None:
@@ -180,6 +237,7 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
             "timer_current": timer.get("current"),
             "timer_initial": timer.get("initial"),
             "humidity": steam.get("relativeHumidity", {}).get("current"),
+            "steam_mode": steam.get("mode"),
         }
 
         if temp_bulbs.get("mode") == "wet":
@@ -215,9 +273,23 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
             return
 
         if self.hvac_mode == HVACMode.HEAT:
-            await self._async_adjust_running_cook(temperature)
+            await self._async_adjust_running_cook(temperature_c=temperature)
         else:
             self._pending_target = temperature
+            self.async_write_ha_state()
+
+    async def async_set_humidity(self, humidity: int) -> None:
+        """Set the steam: steam percentage in dry mode, humidity in sous vide.
+
+        While cooking, the running cook is re-sent with only the steam
+        changed (temperature, elements, fan, vent, stages and the remaining
+        timer are kept). While off, the value is used at the next turn-on.
+        """
+        humidity = int(humidity)
+        if self.hvac_mode == HVACMode.HEAT:
+            await self._async_adjust_running_cook(steam=humidity)
+        else:
+            self._pending_humidity = humidity
             self.async_write_ha_state()
 
     async def async_turn_on(self) -> None:
@@ -229,104 +301,77 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
         await self._async_turn_off()
 
     async def _async_turn_on(self) -> None:
-        """Start cooking with current or default temperature."""
+        """Start a dry cook at the chosen (or last) temperature and steam."""
         target_temp = self.native_target_temperature
         if target_temp is None:
             target_temp = DEFAULT_TEMPERATURE_CELSIUS
+        state = self.coordinator.get_device_state(self._device_id) or {}
+        if (state.get("nodes", {}).get("temperatureBulbs", {}).get("mode")) == "wet":
+            # Last cook was sous vide: its wet-bulb setpoint is no dry target
+            target_temp = (
+                self._pending_target
+                if self._pending_target is not None
+                else DEFAULT_TEMPERATURE_CELSIUS
+            )
+        steam = self._pending_humidity
+        if steam is None:
+            mode, value = self._node_steam(state)
+            steam = value if mode == "steam-percentage" and value else 0
 
-        await self._async_start_cook(target_temp)
+        await self._async_start_cook(target_temp, steam)
         self._pending_target = None
+        self._pending_humidity = None
 
     async def _async_turn_off(self) -> None:
         """Stop cooking."""
         await self.coordinator.send_command(self._device_id, CMD_APO_STOP)
         await self.coordinator.async_request_refresh()
 
-    async def _async_start_cook(self, temperature: float) -> None:
-        """Start cooking with specified temperature.
+    async def _async_start_cook(self, temperature: float, steam: int = 0) -> None:
+        """Start a fresh dry cook like the Anova app's manual cook.
 
-        Note: this always starts a fresh single-stage dry-mode cook with
-        default fan speed, humidity, and top+rear heating. It will
-        overwrite any in-progress multi-stage or steam cook started from
-        the Anova app.
+        Rear element, fan on high, vent closed, a preheat stage and no timer;
+        steam is a steam percentage. This replaces any running cook.
         """
-        device_info = self.coordinator.get_device_info(self._device_id)
-        device_type = (
-            device_info.get("type", OVEN_TYPE_V1) if device_info else OVEN_TYPE_V1
-        )
-
-        payload = self._create_cook_payload(temperature, device_type)
-
-        self.coordinator.stop_when_timer_done.discard(self._device_id)
-        await self.coordinator.send_command(self._device_id, CMD_APO_START, payload)
-        await self.coordinator.async_request_refresh()
-
-    def _create_cook_payload(
-        self, temperature: float, device_type: str
-    ) -> dict[str, Any]:
-        """Create a cook command payload."""
-        cook_id = str(uuid.uuid4())
-        stage_id = str(uuid.uuid4())
-
         temperature = max(TEMP_MIN_CELSIUS, min(TEMP_MAX_CELSIUS, temperature))
-        fahrenheit = round(temperature * 9 / 5 + 32)
+        try:
+            stages = build_cook_stages(
+                temperature_c=temperature,
+                heating_elements=("rear",),
+                steam=steam or None,
+            )
+        except CookValidationError as err:
+            raise ServiceValidationError(str(err)) from err
+        await self._async_send_stages(stages)
 
-        payload: dict[str, Any] = {
-            "stages": [
-                {
-                    "id": stage_id,
-                    "type": "cook",
-                    "title": "Cook",
-                    "description": "Home Assistant Cook",
-                    "userActionRequired": False,
-                    "temperatureBulbs": {
-                        "mode": "dry",
-                        "dry": {
-                            "setpoint": {
-                                "celsius": temperature,
-                                "fahrenheit": fahrenheit,
-                            }
-                        },
-                    },
-                    "heatingElements": {
-                        "top": {"on": True},
-                        "bottom": {"on": False},
-                        "rear": {"on": True},
-                    },
-                    "fan": {"speed": DEFAULT_FAN_SPEED},
-                    "vent": {"open": False},
-                    "steamGenerators": {
-                        "mode": "relative-humidity",
-                        "relativeHumidity": {"setpoint": DEFAULT_HUMIDITY},
-                    },
-                }
-            ],
-            "cookId": cook_id,
-            "originSource": "api",
-        }
-
-        if device_type == OVEN_TYPE_V2:
-            payload["type"] = "v2"
-            payload["cookerId"] = self._device_id
-
-        return payload
-
-    async def _async_adjust_running_cook(self, temperature: float) -> None:
-        """Change the running cook's temperature, keeping its other settings."""
+    async def _async_adjust_running_cook(
+        self, *, temperature_c: float | None = None, steam: int | None = None
+    ) -> None:
+        """Change the running cook's temperature or steam, keeping the rest."""
         state = self.coordinator.get_device_state(self._device_id) or {}
-        cook = state.get("cook") if isinstance(state.get("cook"), dict) else {}
+        cook = self._cook(state)
         stages = cook.get("stages") if isinstance(cook.get("stages"), list) else []
         timer = state.get("nodes", {}).get("timer", {})
         remaining_s = timer.get("current") if timer.get("mode") == "running" else None
         try:
-            new_stages = retarget_stages(
-                stages, cook.get("activeStageId"), temperature, remaining_s
+            new_stages = adjust_stages(
+                stages,
+                cook.get("activeStageId"),
+                temperature_c=temperature_c,
+                steam=steam,
+                timer_remaining_s=remaining_s,
             )
         except CookValidationError as err:
             raise ServiceValidationError(str(err)) from err
         if new_stages is None:
             # Nothing to preserve (e.g. no stage info yet): simple cook
-            await self._async_start_cook(temperature)
+            if temperature_c is None:
+                temperature_c = self.native_target_temperature
+            if temperature_c is None:
+                temperature_c = DEFAULT_TEMPERATURE_CELSIUS
+            if steam is None:
+                steam = self.target_humidity or 0
+            await self._async_start_cook(temperature_c, int(steam))
             return
         keep_stop = self._device_id in self.coordinator.stop_when_timer_done
         await self._async_send_stages(new_stages)

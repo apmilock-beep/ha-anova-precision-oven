@@ -152,20 +152,62 @@ def build_cook_stages(
     return stages
 
 
-def retarget_stages(
+def stage_steam(stage: dict[str, Any]) -> int:
+    """Return a stage's steam setting as a percentage (0 when none).
+
+    In dry mode the Anova app sends steam as steam-percentage; sous vide
+    (wet bulb) uses relative humidity. Both are a 0-100 setpoint.
+    """
+    steam = stage.get("steamGenerators")
+    if not isinstance(steam, dict):
+        return 0
+    mode = steam.get("mode")
+    if mode == "steam-percentage":
+        value = (steam.get("steamPercentage") or {}).get("setpoint")
+    elif mode == "relative-humidity":
+        value = (steam.get("relativeHumidity") or {}).get("setpoint")
+    else:
+        return 0
+    return int(value) if isinstance(value, (int, float)) else 0
+
+
+def _set_stage_steam(stage: dict[str, Any], steam: int) -> None:
+    """Set a stage's steam the way the Anova app does for its bulb mode."""
+    wet = (stage.get("temperatureBulbs") or {}).get("mode") == "wet"
+    if wet:
+        stage["steamGenerators"] = {
+            "mode": "relative-humidity",
+            "relativeHumidity": {"setpoint": steam},
+        }
+    elif steam:
+        stage["steamGenerators"] = {
+            "mode": "steam-percentage",
+            "steamPercentage": {"setpoint": steam},
+        }
+    else:
+        stage.pop("steamGenerators", None)
+    if steam or wet:
+        # The app locks the fan on high whenever steam is in use
+        stage["fan"] = {"speed": 100}
+
+
+def adjust_stages(
     stages: list[dict[str, Any]],
     active_stage_id: str | None,
-    temperature_c: float,
+    *,
+    temperature_c: float | None = None,
+    steam: int | None = None,
     timer_remaining_s: int | None = None,
 ) -> list[dict[str, Any]] | None:
-    """Return the rest of a running cook with a new temperature.
+    """Return the rest of a running cook with a new temperature and/or steam.
 
     The oven has no "adjust" command, so a change is sent as a new cook made
-    of the active stage and the stages after it. The active stage gets the
-    new temperature, and so do later stages that shared its old setpoint
-    (a preheat and its cook stage, say); stages with their own temperatures
-    keep them. A running timer carries over its remaining time. Returns None
-    when the active stage can't be found.
+    of the active stage and the stages after it; a cook that is past its
+    preheat stage is therefore sent without one. The active stage gets the
+    new value, and so do later stages that shared its old value (a preheat
+    and its cook stage, say); stages with their own settings keep them.
+    Every other setting is copied unchanged. A running timer carries over
+    its remaining time. Returns None when the active stage can't be found.
     """
     index = next(
         (
@@ -186,22 +228,52 @@ def retarget_stages(
         return mode, bulbs.setdefault(mode, {})
 
     mode, active_bulb = bulb(remaining[0])
-    old = (active_bulb.get("setpoint") or {}).get("celsius")
-    max_c = TEMP_MAX_WET_CELSIUS if mode == "wet" else TEMP_MAX_CELSIUS
-    if not TEMP_MIN_CELSIUS <= temperature_c <= max_c:
-        raise CookValidationError(
-            f"Temperature must be between {TEMP_MIN_CELSIUS} and {max_c} °C"
-        )
 
-    for position, stage in enumerate(remaining):
-        stage_mode, stage_bulb = bulb(stage)
-        current = (stage_bulb.get("setpoint") or {}).get("celsius")
-        if position == 0 or (stage_mode == mode and current == old):
-            stage_bulb["setpoint"] = setpoint(temperature_c)
+    if temperature_c is not None:
+        old = (active_bulb.get("setpoint") or {}).get("celsius")
+        max_c = TEMP_MAX_WET_CELSIUS if mode == "wet" else TEMP_MAX_CELSIUS
+        if not TEMP_MIN_CELSIUS <= temperature_c <= max_c:
+            raise CookValidationError(
+                f"Temperature must be between {TEMP_MIN_CELSIUS} and {max_c} °C"
+            )
+        for position, stage in enumerate(remaining):
+            stage_mode, stage_bulb = bulb(stage)
+            current = (stage_bulb.get("setpoint") or {}).get("celsius")
+            if position == 0 or (stage_mode == mode and current == old):
+                stage_bulb["setpoint"] = setpoint(temperature_c)
+
+    if steam is not None:
+        if not 0 <= steam <= 100:
+            raise CookValidationError("Steam must be 0-100")
+        old_steam = stage_steam(remaining[0])
+        for position, stage in enumerate(remaining):
+            stage_mode, _ = bulb(stage)
+            if position == 0 or (
+                stage_mode == mode and stage_steam(stage) == old_steam
+            ):
+                _set_stage_steam(stage, int(steam))
 
     if timer_remaining_s and isinstance(remaining[0].get("timer"), dict):
         remaining[0]["timer"]["initial"] = int(timer_remaining_s)
     return remaining
+
+
+def retarget_stages(
+    stages: list[dict[str, Any]],
+    active_stage_id: str | None,
+    temperature_c: float,
+    timer_remaining_s: int | None = None,
+) -> list[dict[str, Any]] | None:
+    """Return the rest of a running cook with a new temperature.
+
+    See adjust_stages; kept for callers that only change the temperature.
+    """
+    return adjust_stages(
+        stages,
+        active_stage_id,
+        temperature_c=temperature_c,
+        timer_remaining_s=timer_remaining_s,
+    )
 
 
 def prepare_custom_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:

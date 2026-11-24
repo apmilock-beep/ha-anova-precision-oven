@@ -40,6 +40,26 @@ def _get_nested(state: dict, *keys: str, default: Any = None) -> Any:
     return current
 
 
+def _steam_setpoint(state: dict[str, Any]) -> Any:
+    """Return the steam setpoint for whichever steam mode the oven reports.
+
+    Dry cooks with steam use steam-percentage; sous vide uses relative
+    humidity. "idle" means no steam (0).
+    """
+    mode = _get_nested(state, "nodes", "steamGenerators", "mode")
+    if mode == "steam-percentage":
+        return _get_nested(
+            state, "nodes", "steamGenerators", "steamPercentage", "setpoint"
+        )
+    if mode == "relative-humidity":
+        return _get_nested(
+            state, "nodes", "steamGenerators", "relativeHumidity", "setpoint"
+        )
+    if mode == "idle":
+        return 0
+    return None
+
+
 def _cook(state: dict[str, Any]) -> dict[str, Any]:
     """Return the running cook's data.
 
@@ -248,9 +268,10 @@ SENSOR_DESCRIPTIONS: tuple[AnovaOvenSensorDescription, ...] = (
         name="Humidity setpoint",
         device_class=SensorDeviceClass.HUMIDITY,
         native_unit_of_measurement=PERCENTAGE,
-        value_fn=lambda s: _get_nested(
-            s, "nodes", "steamGenerators", "relativeHumidity", "setpoint"
-        ),
+        value_fn=lambda s: _steam_setpoint(s),
+        extra_attrs_fn=lambda s: {
+            "steam_mode": _get_nested(s, "nodes", "steamGenerators", "mode"),
+        },
     ),
     AnovaOvenSensorDescription(
         key="fan_speed",
