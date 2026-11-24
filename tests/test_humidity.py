@@ -303,3 +303,34 @@ async def test_climate_turn_on_after_sous_vide_uses_dry_default():
     assert cook["temperatureBulbs"]["mode"] == "dry"
     assert cook["temperatureBulbs"]["dry"]["setpoint"]["celsius"] == 175
     assert "steamGenerators" not in cook  # RH 100 is not carried into dry
+
+
+async def test_climate_off_after_sous_vide_shows_what_turn_on_uses():
+    state = _state(
+        APP_SOUS_VIDE_COOK,
+        SV_COOK_ID,
+        bulb_mode="wet",
+        steam_nodes={"mode": "relative-humidity", "relativeHumidity": {"setpoint": 100, "current": 84}},
+    )
+    state["state"]["mode"] = "idle"
+    state.pop("cook")
+    entity, _ = _climate(state)
+    assert entity.native_target_temperature == 175
+    assert entity.target_humidity == 0
+    assert entity.current_humidity == 84
+
+
+async def test_climate_off_after_steam_cook_shows_last_settings():
+    state = _state(APP_STEAM_COOK, COOK_ID)
+    state["state"]["mode"] = "idle"
+    state.pop("cook")
+    entity, _ = _climate(state)
+    assert entity.native_target_temperature == 148.89
+    assert entity.target_humidity == 35
+
+
+async def test_extra_attributes_do_not_shadow_target_humidity():
+    entity, _ = _climate(_state(APP_STEAM_COOK, COOK_ID))
+    # "humidity" is Home Assistant's target-humidity attribute
+    assert "humidity" not in entity.extra_state_attributes
+    assert entity.extra_state_attributes["steam_mode"] == "steam-percentage"

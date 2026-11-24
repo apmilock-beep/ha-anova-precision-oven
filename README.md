@@ -89,9 +89,10 @@ Lamp on/off.
 The climate entity works like a thermostat for the oven (temperature step 5°, humidity step 5 %):
 
 - **Target humidity is the oven's steam setting.** In a dry cook it is the steam percentage (what the Anova app calls steam, sent as `steam-percentage`); in a sous vide (wet bulb) cook it is relative humidity. `current_humidity` is the measured relative humidity, which the oven reports in sous vide but not with steam percentage.
-- **Off:** changing the temperature or humidity only stores it. Turning on starts a dry cook like the app's manual cook: rear element, fan 100 %, a preheat stage, no timer, the stored (or last) temperature and steam percentage. After a sous vide cook, turning on uses 175 °C unless a temperature was chosen.
+- **Off:** changing the temperature or humidity only stores it, and the entity shows the temperature and steam that turning on will use. Turning on starts a dry cook like the app's manual cook: rear element, fan 100 %, a preheat stage, no timer, the stored (or last) temperature and steam percentage. After a sous vide cook, turning on uses 175 °C and no steam unless other values were chosen.
 - **Cooking:** changing the temperature or the humidity re-sends the running cook from the active stage on, with only that value changed. Elements, fan, vent, the other value and the remaining timer are kept; a preheat stage and the cook stage after it move together, while later stages with their own settings keep them. A cook already past preheat is re-sent without its preheat stage. Adding steam locks the fan on high, as the app does. Anova's API has no "adjust" command, so this is a fresh cook as far as the oven is concerned (its cook ID changes).
 - **Preheating:** v1 ovens report mode `cook` during the preheat stage, so `hvac_action` reads the active stage and shows `preheating` until the cook stage starts.
+- The measured relative humidity is in the standard `current_humidity` attribute (the old extra `humidity` attribute is gone, as it hid the target humidity), and `steam_mode` says which steam mode the oven is in.
 - `turn_off` sends `CMD_APO_STOP`.
 
 ## Actions

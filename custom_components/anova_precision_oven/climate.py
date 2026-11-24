@@ -189,12 +189,11 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
         state = self.coordinator.get_device_state(self._device_id)
         if not state:
             return None
-        if self.hvac_mode == HVACMode.OFF and self._pending_humidity is not None:
-            return self._pending_humidity
-        if self.hvac_mode == HVACMode.HEAT:
-            stage = self._active_stage(state)
-            if stage is not None:
-                return stage_steam(stage)
+        if self.hvac_mode == HVACMode.OFF:
+            return self._turn_on_steam(state)
+        stage = self._active_stage(state)
+        if stage is not None:
+            return stage_steam(stage)
         return self._node_steam(state)[1]
 
     @property
@@ -214,10 +213,29 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
         if not state:
             return None
 
-        if self.hvac_mode == HVACMode.OFF and self._pending_target is not None:
-            return self._pending_target
+        if self.hvac_mode == HVACMode.OFF:
+            return self._turn_on_temperature(state)
         bulbs = state.get("nodes", {}).get("temperatureBulbs", {})
         return bulbs.get(bulbs.get("mode", "dry"), {}).get("setpoint", {}).get("celsius")
+
+    def _turn_on_temperature(self, state: dict[str, Any]) -> float:
+        """Return the dry temperature turning on would use."""
+        if self._pending_target is not None:
+            return self._pending_target
+        bulbs = state.get("nodes", {}).get("temperatureBulbs", {})
+        if bulbs.get("mode") != "wet":
+            last = bulbs.get("dry", {}).get("setpoint", {}).get("celsius")
+            if last is not None:
+                return last
+        # After sous vide the wet-bulb setpoint is no dry target
+        return DEFAULT_TEMPERATURE_CELSIUS
+
+    def _turn_on_steam(self, state: dict[str, Any]) -> int:
+        """Return the steam percentage turning on would use."""
+        if self._pending_humidity is not None:
+            return self._pending_humidity
+        mode, value = self._node_steam(state)
+        return int(value) if mode == "steam-percentage" and value else 0
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
@@ -236,7 +254,6 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
             "timer_mode": timer.get("mode"),
             "timer_current": timer.get("current"),
             "timer_initial": timer.get("initial"),
-            "humidity": steam.get("relativeHumidity", {}).get("current"),
             "steam_mode": steam.get("mode"),
         }
 
@@ -302,23 +319,10 @@ class AnovaOvenClimate(AnovaOvenEntity, ClimateEntity):
 
     async def _async_turn_on(self) -> None:
         """Start a dry cook at the chosen (or last) temperature and steam."""
-        target_temp = self.native_target_temperature
-        if target_temp is None:
-            target_temp = DEFAULT_TEMPERATURE_CELSIUS
         state = self.coordinator.get_device_state(self._device_id) or {}
-        if (state.get("nodes", {}).get("temperatureBulbs", {}).get("mode")) == "wet":
-            # Last cook was sous vide: its wet-bulb setpoint is no dry target
-            target_temp = (
-                self._pending_target
-                if self._pending_target is not None
-                else DEFAULT_TEMPERATURE_CELSIUS
-            )
-        steam = self._pending_humidity
-        if steam is None:
-            mode, value = self._node_steam(state)
-            steam = value if mode == "steam-percentage" and value else 0
-
-        await self._async_start_cook(target_temp, steam)
+        await self._async_start_cook(
+            self._turn_on_temperature(state), self._turn_on_steam(state)
+        )
         self._pending_target = None
         self._pending_humidity = None
 
